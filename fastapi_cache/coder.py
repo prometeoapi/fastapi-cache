@@ -1,20 +1,20 @@
+import dataclasses
 import datetime
 import json
 import pickle  # nosec:B403
+from collections.abc import Callable
 from decimal import Decimal
 from typing import (
     Any,
-    Callable,
     ClassVar,
-    Dict,
-    Optional,
     TypeVar,
-    Union,
+    get_origin,
     overload,
 )
 
 import pendulum
 from fastapi.encoders import jsonable_encoder
+from pydantic import BaseModel
 from starlette.responses import JSONResponse
 from starlette.templating import (
     _TemplateResponse as TemplateResponse,  # pyright: ignore[reportPrivateUsage]
@@ -24,10 +24,11 @@ from starlette.templating import (
 class ModelField:
     pass
 
+
 _T = TypeVar("_T", bound=type)
 
 
-CONVERTERS: Dict[str, Callable[[str], Any]] = {
+CONVERTERS: dict[str, Callable[[str], Any]] = {
     # Pendulum 3.0.0 adds parse to __all__, at which point these ignores can be removed
     "date": lambda x: pendulum.parse(x, exact=True),
     "datetime": lambda x: pendulum.parse(x, exact=True),
@@ -72,20 +73,18 @@ class Coder:
     # decode_as_type method and then stores a different kind of field for a
     # given type, do make sure that the subclass provides its own class
     # attribute for this cache.
-    _type_field_cache: ClassVar[Dict[Any, ModelField]] = {}
+    _type_field_cache: ClassVar[dict[Any, ModelField]] = {}
 
     @overload
     @classmethod
-    def decode_as_type(cls, value: bytes, *, type_: _T) -> _T:
-        ...
+    def decode_as_type(cls, value: bytes, *, type_: _T) -> _T: ...
 
     @overload
     @classmethod
-    def decode_as_type(cls, value: bytes, *, type_: None) -> Any:
-        ...
+    def decode_as_type(cls, value: bytes, *, type_: None) -> Any: ...
 
     @classmethod
-    def decode_as_type(cls, value: bytes, *, type_: Optional[_T]) -> Union[_T, Any]:
+    def decode_as_type(cls, value: bytes, *, type_: _T | None) -> _T | Any:
         """Decode value to the specific given type
 
         The default implementation uses the Pydantic model system to convert the value.
@@ -109,6 +108,19 @@ class JsonCoder(Coder):
         # encoding used.
         return json.loads(value.decode(), object_hook=object_hook)
 
+    @classmethod
+    def decode_as_type(cls, value: bytes, *, type_: _T | None) -> _T | Any:
+        result = cls.decode(value)
+        if type_ is None:
+            return result
+        if get_origin(type_) is tuple:
+            return tuple(result)
+        if isinstance(type_, type) and issubclass(type_, BaseModel):
+            return type_.model_validate(result)
+        if dataclasses.is_dataclass(type_) and isinstance(type_, type):
+            return type_(**result)
+        return result
+
 
 class PickleCoder(Coder):
     @classmethod
@@ -122,7 +134,7 @@ class PickleCoder(Coder):
         return pickle.loads(value)  # noqa: S301
 
     @classmethod
-    def decode_as_type(cls, value: bytes, *, type_: Optional[_T]) -> Any:
+    def decode_as_type(cls, value: bytes, *, type_: _T | None) -> Any:
         # Pickle already produces the correct type on decoding, no point
         # in paying an extra performance penalty for pydantic to discover
         # the same.
